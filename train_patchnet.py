@@ -232,25 +232,17 @@ def train_test():
                 log_file.write('------Start Validation------\n')
                 log_file.flush()
                 for i, (inputs, labels, binary) in enumerate(valid_loader):
-                    # get the inputs
-                    inputs, labels, binary = inputs, labels.cuda(), binary.cuda()
-                    optimizer.zero_grad()
+                    # inputs: [B, P, C, H, W] -> B images, each split into P patches
+                    binary = binary.cuda()
                     if i % 500:
                         print(f'index: {i}')
-                    # forward + backward + optimize
-                    for j in range(len(inputs)):
-                        img_i = inputs[j].cuda()
-                        # feat_vectori, map_xi = model(img_i)
-                        feat_vectori = model(img_i)
-                        live_prob = AM_model._predict(feat_vectori)
-                        if j == 0:
-                            sum_prob = live_prob
-                        else:
-                            sum_prob += live_prob
-                    avg_prob = sum_prob / 9
-                    for k in range(int(avg_prob.shape[0])):
-                        live_prob = avg_prob[k]
-                        score_list.append('{} {}\n'.format(live_prob, int(binary[k])))
+                    B, P, C, H, W = inputs.shape
+                    # score all P patches of every image in one batched forward pass
+                    feats = model(inputs.view(B * P, C, H, W).cuda())
+                    # per-patch live probability, then average the P patches per image
+                    avg_prob = AM_model._predict(feats).view(B, P).mean(dim=1)  # [B]
+                    for k in range(B):
+                        score_list.append('{} {}\n'.format(avg_prob[k].item(), int(binary[k])))
                 
                 map_score_val_filename = args.log+'/'+ args.log+'_map_score_val.txt'
                 with open(map_score_val_filename, 'w') as file:

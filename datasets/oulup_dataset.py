@@ -4,29 +4,39 @@ cwd = Path(__file__).parent.absolute()
 import os
 import cv2
 import numpy as np
+import torch
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from torchvision import transforms
 import albumentations as A
 from albumentations.pytorch import ToTensorV2 as ToTensor
 
-class uniform_crop(object):
-    def __call__(self, img):
-        h, w = img.shape[0], img.shape[1]
-        patch_h, patch_w = round(h/3), round(w/3)
-        # top
-        img_1 = img[0:patch_h, 0:patch_w, :]
-        img_2 = img[0:patch_h, patch_w:2*patch_w, :]
-        img_3 = img[0:patch_h, 2*patch_w:, :]
-        # middle
-        img_4 = img[patch_h:2*patch_h, 0:patch_w, :]
-        img_5 = img[patch_h:2*patch_h, patch_w:2*patch_w, :]
-        img_6 = img[patch_h:2*patch_h, 2*patch_w:, :]
-        # bottom
-        img_7 = img[2*patch_h:, 0:patch_w, :]
-        img_8 = img[2*patch_h:, patch_w:2*patch_w, :]
-        img_9 = img[2*patch_h:, 2*patch_w:, :]
-        return img_1, img_2, img_3, img_4, img_5, img_6, img_7, img_8, img_9
+
+def uniform_crop(img, grid=3):
+    """Split an image into ``grid x grid`` non-overlapping patches.
+
+    For the default ``grid=3`` this yields the 9 patches used at inference time,
+    ordered left-to-right then top-to-bottom. The last row/column absorbs any
+    remainder so the patches always tile the whole image.
+
+    Args:
+        img: HxWxC numpy image.
+        grid: number of splits per axis (3 -> 9 patches).
+
+    Returns:
+        A list of ``grid * grid`` patch crops (numpy arrays).
+    """
+    h, w = img.shape[:2]
+    patch_h, patch_w = round(h / grid), round(w / grid)
+    patches = []
+    for i in range(grid):
+        for j in range(grid):
+            y0, x0 = i * patch_h, j * patch_w
+            # last row/column extends to the image border (matches the old 2*p: slices)
+            y1 = (i + 1) * patch_h if i < grid - 1 else h
+            x1 = (j + 1) * patch_w if j < grid - 1 else w
+            patches.append(img[y0:y1, x0:x1, :])
+    return patches
 
 
 class AMOuluDataset(Dataset):
@@ -49,34 +59,25 @@ class AMOuluDataset(Dataset):
 
     def __getitem__(self, idx):
         data_item = self.data[str(idx)]
-        # input
+        # read image and convert BGR (OpenCV) -> RGB
         img = cv2.imread(os.path.join(self.root_folder, data_item['path']))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        # label
+        # fine-grained label (0~5 = live, 6~29 = spoof); binary live/spoof flag
         label = data_item['label']
-        if label <= 5:
-            binary = 0
-        else:
-            binary = 1
+        binary = int(label > 5)  # 0 = live, 1 = spoof
+
         if self.mode == 'train':
-            if self.transform:
-                img1 = self.transform(image=img)['image']
-                img2 = self.transform(image=img)['image']
-            return img1, img2, label, binary
-        else:
-            trans = uniform_crop()
-            img1, img2, img3, img4, img5, img6, img7, img8, img9 = trans(img=img)
-            if self.transform:
-                img1 = self.transform(image=img1)['image']
-                img2 = self.transform(image=img2)['image']
-                img3 = self.transform(image=img3)['image']
-                img4 = self.transform(image=img4)['image']
-                img5 = self.transform(image=img5)['image']
-                img6 = self.transform(image=img6)['image']
-                img7 = self.transform(image=img7)['image']
-                img8 = self.transform(image=img8)['image']
-                img9 = self.transform(image=img9)['image']
-            return [img1, img2, img3, img4, img5, img6, img7, img8, img9], label, binary
+            # Two augmented views of the SAME image: one is classified by the
+            # AM-Softmax head, and the pair feeds the self-supervised similarity loss.
+            view1 = self.transform(image=img)['image']
+            view2 = self.transform(image=img)['image']
+            return view1, view2, label, binary
+
+        # valid / test: crop 9 uniform patches and transform each one.
+        # Stacked into [num_patches, C, H, W] so the eval loop can score the
+        # whole image in a single batched forward pass.
+        patches = [self.transform(image=p)['image'] for p in uniform_crop(img)]
+        return torch.stack(patches), label, binary
 
 if __name__ == "__main__":
     transform = A.Compose(
@@ -90,13 +91,8 @@ if __name__ == "__main__":
                             mode='valid',\
                             transform=transform)
     train_loader = DataLoader(train_data, batch_size=4, shuffle=True, num_workers=4)
-    for i, (img1, img2, img3, img4, img5, img6, img7, img8, img9, labels, binary) in enumerate(train_loader):
-        print(img1.shape)
-        print(img2.shape)
-        print(img3.shape)
-        print(img4.shape)
-        print(img5.shape)
-        print(img6.shape)
-        print(img7.shape)
-        print(img8.shape)
-        print(img9.shape)
+    # valid/test yields stacked patches: [batch, num_patches, C, H, W]
+    for i, (patches, labels, binary) in enumerate(train_loader):
+        print(patches.shape)
+        print(labels, binary)
+        break
