@@ -197,11 +197,12 @@ def performances(map_score_val_filename, map_score_test_filename=None):
     val_AUC = auc(fpr, tpr)
     val_err, val_threshold = get_err_threhold(fpr, tpr, threshold)
     
-    type1 = len([s for s in data if s['map_score'] <= val_threshold and s['label'] == 0])
-    type2 = len([s for s in data if s['map_score'] > val_threshold and s['label'] == 1])
+    # label 0 = live (bona fide), label 1 = spoof (attack); score = live probability
+    type1 = len([s for s in data if s['map_score'] <= val_threshold and s['label'] == 0])  # live judged as attack
+    type2 = len([s for s in data if s['map_score'] > val_threshold and s['label'] == 1])   # attack judged as live
     val_ACC = 1-(type1 + type2) / count
-    val_APCER = type1 / num_real
-    val_BPCER = type2 / num_fake
+    val_APCER = type2 / num_fake   # APCER: attacks accepted as bona fide
+    val_BPCER = type1 / num_real   # BPCER: bona fide rejected as attack
     val_ACER = (val_APCER + val_BPCER) / 2.0
     
     

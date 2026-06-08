@@ -4,14 +4,25 @@ import torch.nn.functional as F
 
 class AdMSoftmaxLoss(nn.Module):
 
-    def __init__(self, in_features, out_features, s=30.0, ml=0.4, ms=0.1):
+    def __init__(self, in_features, out_features, s=30.0, ml=0.4, ms=0.1, num_live=6):
         '''
-        AM Softmax Loss
+        Asymmetric AM-Softmax loss (PatchNet).
+
+        Args:
+            in_features:  embedding dimension (ResNet-18 -> 512).
+            out_features: number of fine-grained classes (OULU-NPU P1 -> 30:
+                          6 live + 6 cameras x 4 attacks = 24 spoof).
+            s:            scale applied to the cosine logits.
+            ml:           additive margin for LIVE classes (larger -> more compact).
+            ms:           additive margin for SPOOF classes (smaller -> looser).
+            num_live:     number of live classes; labels [0, num_live) are live,
+                          labels [num_live, out_features) are spoof.
         '''
         super(AdMSoftmaxLoss, self).__init__()
         self.s = torch.tensor(s).cuda()
         self.ml = ml
         self.ms = ms
+        self.num_live = num_live
         self.in_features = in_features
         self.out_features = out_features
         # self.fc = nn.Linear(in_features, out_features, bias=False)
@@ -31,10 +42,10 @@ class AdMSoftmaxLoss(nn.Module):
         # wf = self.fc(x)
         wf = F.linear(F.normalize(x, dim=1), F.normalize(self.weight))
         wf = wf.clamp(-1, 1)
-        # for real img margin is 0.4, fake img margin is 0.1
+        # asymmetric margin: live classes get the larger margin ml, spoof get ms
         m = torch.zeros(int(labels.shape[0]))
-        real = labels <= 5 
-        fake = labels > 5
+        real = labels < self.num_live
+        fake = labels >= self.num_live
         real_indices = real.nonzero().squeeze(1)
         fake_indices = fake.nonzero().squeeze(1)
         m[real_indices] = self.ml
@@ -54,5 +65,6 @@ class AdMSoftmaxLoss(nn.Module):
         # x = F.normalize(x, dim=1)
         y = self.s * F.linear(F.normalize(x, dim=1), F.normalize(self.weight))
         prob = F.softmax(y, dim=1)
-        live_prob = torch.sum(prob[:, 0:5], dim=1)
+        # live probability = sum of softmax over the live classes [0, num_live)
+        live_prob = torch.sum(prob[:, 0:self.num_live], dim=1)
         return live_prob
